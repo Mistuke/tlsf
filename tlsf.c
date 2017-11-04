@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include "tlsf.h"
 
 /*
@@ -14,7 +15,7 @@
 #define SL_INDEX_COUNT_SHIFT 5
 
 // All allocation sizes and addresses are aligned.
-#define ALIGN_SIZE (1UL << ALIGN_SIZE_SHIFT)
+#define ALIGN_SIZE (1ULL << ALIGN_SIZE_SHIFT)
 
 #if __WORDSIZE == 64
 #  define ALIGN_SIZE_SHIFT 3
@@ -50,10 +51,11 @@
  * - bit 0: whether block is busy or free
  * - bit 1: whether previous block is busy or free
 */
-#define BLOCK_FREE_BIT      (1UL << (__WORDSIZE - 1))
-#define BLOCK_PREV_FREE_BIT (1UL << (__WORDSIZE - 2))
-#define BLOCK_POOL_BIT      (1UL << (__WORDSIZE - 3))
-#define BLOCK_BITMASK       (BLOCK_POOL_BIT | BLOCK_FREE_BIT | BLOCK_PREV_FREE_BIT)
+#define BLOCK_FREE_BIT      (1ULL << (__WORDSIZE - 1))
+#define BLOCK_PREV_FREE_BIT (1ULL << (__WORDSIZE - 2))
+#define BLOCK_POOL_BIT      (1ULL << (__WORDSIZE - 3))
+#define BLOCK_BITMASK       (BLOCK_POOL_BIT | BLOCK_FREE_BIT | \
+                             BLOCK_PREV_FREE_BIT)
 
 /*
  * The size of the block header exposed to used blocks is the size field.
@@ -71,7 +73,7 @@
  * bits for FL_INDEX.
 */
 #define BLOCK_SIZE_MIN (sizeof (struct block_s) - sizeof (block_t))
-#define BLOCK_SIZE_MAX (1UL << (FL_INDEX_MAX - 1))
+#define BLOCK_SIZE_MAX (1ULL << (FL_INDEX_MAX - 1))
 
 /*
  * Size of the TLSF structures in a given memory block passed to
@@ -90,11 +92,17 @@
 
 // This code has been tested on 32- and 64-bit (LP/LLP) architectures.
 static_assert(sizeof(int) == 4, "Integer must be 32 bit");
-static_assert(sizeof(size_t) * 8 == __WORDSIZE, "size_t must have __WORDSIZE bits");
-static_assert(sizeof(size_t) == 4 || sizeof (size_t) == 8, "size_t must be 32 or 64 bit");
-static_assert(sizeof(unsigned int) * 8 >= SL_INDEX_COUNT, "SL_INDEX_COUNT must be <= number of bits in sl_bitmap's storage type.");
-static_assert(ALIGN_SIZE == SMALL_BLOCK_SIZE / SL_INDEX_COUNT, "Sizes are not properly set");
-static_assert(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD, "Max allocation size is wrong");
+static_assert(sizeof(size_t) * 8 == __WORDSIZE,
+              "size_t must have __WORDSIZE bits");
+static_assert(sizeof(size_t) == 4 || sizeof (size_t) == 8,
+              "size_t must be 32 or 64 bit");
+static_assert(sizeof(unsigned int) * 8 >= SL_INDEX_COUNT,
+              "SL_INDEX_COUNT must be <= number of bits in sl_bitmap's "
+              "storage type.");
+static_assert(ALIGN_SIZE == SMALL_BLOCK_SIZE / SL_INDEX_COUNT,
+              "Sizes are not properly set");
+static_assert(BLOCK_SIZE_MAX == TLSF_MAX_SIZE + BLOCK_OVERHEAD,
+              "Max allocation size is wrong");
 
 // We have to use size_t bitmaps if we want to support larger blocks.
 static_assert(FL_INDEX_COUNT <= 32, "Index too large");
@@ -164,7 +172,8 @@ static inline unsigned int tlsf_ffs(size_t x) {
 }
 
 static inline unsigned int tlsf_fls(size_t x) {
-  return (unsigned int)(x ? 8 * sizeof (size_t) - (unsigned int)__builtin_clzl(x) - 1 : 0);
+  return (uint32_t)
+    (x ? 8 * sizeof (size_t) - (uint32_t)__builtin_clzll(x) - 1 : 0);
 }
 
 /*
@@ -215,7 +224,8 @@ static inline block_t block_prev(const block_t block) {
 
 // Return location of next existing block.
 static inline block_t block_next(const block_t block) {
-  block_t next = OFFSET_TO_BLOCK(block_to_ptr(block), block_size(block) - BLOCK_OVERHEAD);
+  block_t next
+    = OFFSET_TO_BLOCK(block_to_ptr(block), block_size(block) - BLOCK_OVERHEAD);
   ASSERT(!block_is_last(block), "Block is last");
   return next;
 }
@@ -266,7 +276,8 @@ static inline size_t adjust_size(size_t size) {
 
 // Rounds up to the next block size
 static inline size_t round_block_size(size_t size) {
-  return size >= SMALL_BLOCK_SIZE ? size + (1UL << (tlsf_fls(size) - SL_INDEX_COUNT_SHIFT)) - 1 : size;
+  return size >= SMALL_BLOCK_SIZE
+    ? size + (1ULL << (tlsf_fls(size) - SL_INDEX_COUNT_SHIFT)) - 1 : size;
 }
 
 /*
@@ -274,7 +285,8 @@ static inline size_t round_block_size(size_t size) {
  * the documentation found in the white paper.
 */
 
-static inline void mapping_insert(size_t size, unsigned int *fli, unsigned int *sli) {
+static inline void mapping_insert(size_t size, unsigned int *fli,
+                                  unsigned int *sli) {
   unsigned int fl, sl;
   if (size < SMALL_BLOCK_SIZE) {
     // Store small blocks in first list.
@@ -283,7 +295,7 @@ static inline void mapping_insert(size_t size, unsigned int *fli, unsigned int *
   } else {
     fl = tlsf_fls(size);
     sl = (unsigned int)((size >> (fl - SL_INDEX_COUNT_SHIFT)) ^
-      (1UL << SL_INDEX_COUNT_SHIFT));
+      (1ULL << SL_INDEX_COUNT_SHIFT));
     fl -= (FL_INDEX_SHIFT - 1);
   }
   ASSERT(fl < FL_INDEX_COUNT, "Wrong fl index count");
@@ -292,7 +304,8 @@ static inline void mapping_insert(size_t size, unsigned int *fli, unsigned int *
   *sli = sl;
 }
 
-static block_t search_suitable_block(tlsf_t t, unsigned int *fli, unsigned int *sli) {
+static block_t search_suitable_block(tlsf_t t, unsigned int *fli,
+                                     unsigned int *sli) {
   unsigned int fl = *fli, sl = *sli;
   ASSERT(fl < FL_INDEX_COUNT, "Wrong fl index count");
   ASSERT(sl < SL_INDEX_COUNT, "Wrong sl index count");
@@ -324,7 +337,8 @@ static block_t search_suitable_block(tlsf_t t, unsigned int *fli, unsigned int *
 }
 
 // Remove a free block from the free list.
-static void remove_free_block(tlsf_t t, block_t block, unsigned int fl, unsigned int sl) {
+static void remove_free_block(tlsf_t t, block_t block, unsigned int fl,
+                              unsigned int sl) {
   ASSERT(fl < FL_INDEX_COUNT, "Wrong fl index count");
   ASSERT(sl < SL_INDEX_COUNT, "Wrong sl index count");
 
@@ -357,7 +371,8 @@ static void remove_free_block(tlsf_t t, block_t block, unsigned int fl, unsigned
 }
 
 // Insert a free block into the free block list.
-static void insert_free_block(tlsf_t t, block_t block, unsigned int fl, unsigned int sl) {
+static void insert_free_block(tlsf_t t, block_t block, unsigned int fl,
+                              unsigned int sl) {
   const block_t current = t->blocks[fl][sl];
   ASSERT(current, "free list cannot have a null entry");
   ASSERT(block, "cannot insert a null entry into the free list");
@@ -365,7 +380,8 @@ static void insert_free_block(tlsf_t t, block_t block, unsigned int fl, unsigned
   block->prev_free = &t->block_null;
   current->prev_free = block;
 
-  ASSERT(block_to_ptr(block) == align_ptr(block_to_ptr(block)), "block not aligned properly");
+  ASSERT(block_to_ptr(block) == align_ptr(block_to_ptr(block)),
+         "block not aligned properly");
   /*
    * Insert the new block at the head of the list, and mark the first-
    * and second-level bitmaps appropriately.
@@ -398,12 +414,15 @@ static void block_insert(tlsf_t t, block_t block) {
 // Split a block into two, the second of which is free.
 static block_t block_split(block_t block, size_t size) {
   // Calculate the amount of space left in the remaining block.
-  const block_t remaining = OFFSET_TO_BLOCK(block_to_ptr(block), size - BLOCK_OVERHEAD);
+  const block_t remaining
+    = OFFSET_TO_BLOCK(block_to_ptr(block), size - BLOCK_OVERHEAD);
 
   const size_t remain_size = block_size(block) - (size + BLOCK_OVERHEAD);
 
-  ASSERT(block_to_ptr(remaining) == align_ptr(block_to_ptr(remaining)), "remaining block not aligned properly");
-  ASSERT(block_size(block) == remain_size + size + BLOCK_OVERHEAD, "remaining block size is wrong");
+  ASSERT(block_to_ptr(remaining) == align_ptr(block_to_ptr(remaining)),
+         "remaining block not aligned properly");
+  ASSERT(block_size(block) == remain_size + size + BLOCK_OVERHEAD,
+         "remaining block size is wrong");
   ASSERT(remain_size >= BLOCK_SIZE_MIN, "block split with invalid size");
 
   remaining->header = remain_size;
@@ -535,7 +554,8 @@ static void remove_pool(tlsf_t t, block_t block) {
 #endif
 
   ASSERT(block_is_last(block_next(block)), "sentinel should be last");
-  ASSERT(!block_is_free(block_next(block)), "sentinel block should not be free");
+  ASSERT(!block_is_free(block_next(block)),
+         "sentinel block should not be free");
   t->unmap((char*)block + BLOCK_OVERHEAD, size + POOL_OVERHEAD, t->user);
 }
 
@@ -579,13 +599,16 @@ tlsf_t tlsf_create(tlsf_map_t map, tlsf_unmap_t unmap, void* user) {
 void tlsf_destroy(tlsf_t t) {
 #ifdef TLSF_STATS
   ASSERT(t->stats.free_size == t->stats.total_size, "Memory leak detected.");
-  ASSERT((t->unmap && t->stats.pool_count == 1) || (!t->unmap && t->stats.pool_count >= 1), "Memory leak detected. Some pools were not released.");
+  ASSERT((t->unmap && t->stats.pool_count == 1) ||
+         (!t->unmap && t->stats.pool_count >= 1),
+        "Memory leak detected. Some pools were not released.");
 #endif
 
   if (t->unmap) {
     block_t first_block = OFFSET_TO_BLOCK(t, TLSF_SIZE  - BLOCK_OVERHEAD);
     ASSERT(block_is_last(block_next(first_block)), "sentinel should be last");
-    ASSERT(!block_is_free(block_next(first_block)), "sentinel block should not be free");
+    ASSERT(!block_is_free(block_next(first_block)),
+           "sentinel block should not be free");
     t->unmap(t, TLSF_SIZE + block_size(first_block) + POOL_OVERHEAD, t->user);
   }
 }
@@ -638,7 +661,9 @@ void tlsf_free(tlsf_t t, void* mem) {
   block = block_merge_prev(t, block);
   block = block_merge_next(t, block);
 
-  if ((block->header & BLOCK_POOL_BIT) && block_is_last(block_next(block)) && t->unmap)
+  if ((block->header & BLOCK_POOL_BIT) &&
+      block_is_last(block_next(block)) &&
+      t->unmap)
     remove_pool(t, block);
   else
     block_insert(t, block);
@@ -658,7 +683,8 @@ void tlsf_free(tlsf_t t, void* mem) {
  *   contents undefined
  */
 void* tlsf_reallocx(tlsf_t t, void* mem, size_t size, int flags) {
-  ASSERT((flags & ~(TLSF_ZERO | TLSF_NOMAP | TLSF_INPLACE)) == 0, "Invalid flags");
+  ASSERT((flags & ~(TLSF_ZERO | TLSF_NOMAP | TLSF_INPLACE)) == 0,
+         "Invalid flags");
 
   // Zero-size requests are treated as free.
   if (mem && size == 0) {
@@ -716,8 +742,10 @@ const tlsf_stats_t* tlsf_stats(tlsf_t t) {
 
 void tlsf_printstats(tlsf_t t) {
   tlsf_stats_t* s = &t->stats;
-  fprintf(stderr, "TSLF free_size=%lu used_size=%lu total_size=%lu pool_count=%lu malloc_count=%lu free_count=%lu\n",
-          s->free_size, s->used_size, s->total_size, s->pool_count, s->malloc_count, s->free_count);
+  fprintf(stderr, "TSLF free_size=%llu used_size=%llu total_size=%llu "
+                  "pool_count=%llu malloc_count=%llu free_count=%llu\n",
+          s->free_size, s->used_size, s->total_size, s->pool_count,
+          s->malloc_count, s->free_count);
 }
 #endif
 
@@ -737,9 +765,9 @@ void tlsf_check(tlsf_t t) {
   // Check that the free lists and bitmaps are accurate.
   for (unsigned int i = 0; i < FL_INDEX_COUNT; ++i) {
     for (unsigned int j = 0; j < SL_INDEX_COUNT; ++j) {
-      const size_t fl_map = t->fl_bitmap & (1UL << i);
+      const size_t fl_map = t->fl_bitmap & (1ULL << i);
       const size_t sl_list = t->sl_bitmap[i];
-      const size_t sl_map = sl_list & (1UL << j);
+      const size_t sl_map = sl_list & (1ULL << j);
       block_t block = t->blocks[i][j];
 
       // Check that first- and second-level lists agree.
@@ -759,7 +787,8 @@ void tlsf_check(tlsf_t t) {
         unsigned int fli, sli;
         INSIST(block_is_free(block), "block should be free");
         INSIST(!block_is_prev_free(block), "blocks should have coalesced");
-        INSIST(!block_is_free(block_next(block)), "blocks should have coalesced");
+        INSIST(!block_is_free(block_next(block)),
+               "blocks should have coalesced");
         INSIST(block_is_prev_free(block_next(block)), "block should be free");
         INSIST(block_size(block) >= BLOCK_SIZE_MIN, "block not minimum size");
 
@@ -769,7 +798,9 @@ void tlsf_check(tlsf_t t) {
       }
     }
   }
-  INSIST(t->stats.free_size + t->stats.used_size == t->stats.total_size, "wrong total memory");
-  INSIST(t->stats.free_count <= t->stats.malloc_count, "wrong free and malloc count");
+  INSIST(t->stats.free_size + t->stats.used_size == t->stats.total_size,
+         "wrong total memory");
+  INSIST(t->stats.free_count <= t->stats.malloc_count,
+         "wrong free and malloc count");
 }
 #endif // TLSF_DEBUG
